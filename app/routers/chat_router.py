@@ -11,14 +11,14 @@ chat_router = APIRouter(prefix="/chat", tags=["Chat"])
 
 # POST /chat
 @chat_router.post("/", dependencies=[Depends(JWTBearer())])
-def start_chat(chat: ChatCreate, payload: dict = Depends(JWTBearer())):
+async def start_chat(chat: ChatCreate, payload: dict = Depends(JWTBearer())):
     user_email = payload.get("sub")
     user_msg = chat.user_message
-    bot_reply = get_llm_response(user_msg)
+    bot_reply = await get_llm_response(user_msg)
 
     chat_doc = ChatInDB(
         user_email=user_email,
-        title=user_msg[:50],  # Simple title based on user prompt
+        title=user_msg[:50],
         messages=[
             Message(sender="user", text=user_msg),
             Message(sender="bot", text=bot_reply)
