@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException
+from starlette.responses import StreamingResponse
+
 from app.auth.jwt_bearer import JWTBearer
 from app.models.chat_history import ChatCreate, ChatInDB, Message
-from app.llm.llm_handler import get_llm_response
+from app.llm.llm_handler import get_llm_response, stream_llm_response
 from app.db.mongo import conversations_collection
 from bson import ObjectId
-from typing import List
-import datetime
 
 chat_router = APIRouter(prefix="/chat", tags=["Chat"])
 
@@ -30,12 +30,12 @@ async def start_chat(chat: ChatCreate, payload: dict = Depends(JWTBearer())):
 
 # GET /chat
 @chat_router.get("/", dependencies=[Depends(JWTBearer())])
-def get_user_chats(payload: dict = Depends(JWTBearer())):
+def get_user_chats(payload: dict = Depends(JWTBearer()), skip: int = 0, limit: int = 10):
     user_email = payload.get("sub")
-    chats = conversations_collection.find({"user_email": user_email})
+    chats_cursor = conversations_collection.find({"user_email": user_email}).sort("created_at", -1).skip(skip).limit(limit)
     return [
         {"chat_id": str(chat["_id"]), "title": chat["title"], "created_at": chat["created_at"]}
-        for chat in chats
+        for chat in chats_cursor
     ]
 
 # GET /chat/{id}
@@ -46,3 +46,30 @@ def get_single_chat(chat_id: str, payload: dict = Depends(JWTBearer())):
         raise HTTPException(status_code=404, detail="Chat not found")
     chat["_id"] = str(chat["_id"])
     return chat
+
+@chat_router.post("/stream", response_class=StreamingResponse, dependencies=[Depends(JWTBearer())])
+async def stream_chat(chat: ChatCreate, payload: dict = Depends(JWTBearer())):
+    return await stream_llm_response(chat.user_message)
+
+@chat_router.post("/{chat_id}/continue", dependencies=[Depends(JWTBearer())])
+async def continue_chat(chat_id: str, chat: ChatCreate, payload: dict = Depends(JWTBearer())):
+    user_email = payload.get("sub")
+    existing = conversations_collection.find_one({"_id": ObjectId(chat_id)})
+
+    if not existing or existing["user_email"] != user_email:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    user_msg = chat.user_message
+    bot_reply = await get_llm_response(user_msg)
+
+    new_messages = [
+        Message(sender="user", text=user_msg),
+        Message(sender="bot", text=bot_reply)
+    ]
+
+    conversations_collection.update_one(
+        {"_id": ObjectId(chat_id)},
+        {"$push": {"messages": {"$each": [m.dict() for m in new_messages]}}}
+    )
+
+    return {"bot_reply": bot_reply}
